@@ -1,10 +1,13 @@
 # URL Shortener in C (front end + back end with a hash map)
 
-A complete, dependency-free URL shortener in a single C file (~185 lines,
-heavily commented). No frameworks, no external libraries — just POSIX
-sockets for the back end and one embedded HTML page for the front end.
+A complete, dependency-free URL shortener in a single C file (~200 lines,
+heavily commented). No frameworks, no external libraries — just OS sockets
+for the back end and one embedded HTML page for the front end. The file is
+cross-platform: it builds on Linux, macOS and Windows from the same source.
 
 ## Build & run
+
+**Linux / macOS**
 
 ```bash
 gcc -O2 -Wall -o shortener url_shortener.c   # any C compiler works (cc/clang)
@@ -12,9 +15,26 @@ gcc -O2 -Wall -o shortener url_shortener.c   # any C compiler works (cc/clang)
 ./shortener 3000       # or pick another port
 ```
 
+**Windows** (MinGW-w64 `gcc`, e.g. from MSYS2, or MSVC) — note the extra
+`-lws2_32` flag, which links the Windows sockets library:
+
+```bat
+gcc -O2 -Wall -o shortener.exe url_shortener.c -lws2_32
+shortener.exe          REM serves http://localhost:8080
+shortener.exe 3000     REM or pick another port
+```
+
 Then open `http://localhost:8080` in a browser, paste a long URL, click
 **Shorten** — you get a short link like `http://localhost:8080/1` that
 redirects to the original page.
+
+### Why the code differs per platform
+
+Networking headers are not portable: Linux/macOS use POSIX (`sys/socket.h`,
+`arpa/inet.h`, `close()`), while Windows uses Winsock2 (`winsock2.h`,
+`closesocket()`, plus a one-time `WSAStartup()`). The file hides that behind a
+small `#ifdef _WIN32` shim near the top, so the server logic below it is
+written once and stays readable.
 
 ## How it works
 
