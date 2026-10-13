@@ -1,7 +1,8 @@
 /* ============================================================================
  * url_shortener.c — A tiny URL shortener (front end + back end) in pure C
+ * Cross-platform: builds on Linux / macOS and on Windows (MinGW-w64 or MSVC)
  * ============================================================================
- * BACK END : A minimal HTTP server (POSIX sockets) that
+ * BACK END : A minimal HTTP server that
  *              GET  /          -> serves the HTML front end below
  *              POST /shorten   -> stores the long URL in a HASH MAP and
  *                                 replies with a short code as JSON
@@ -19,8 +20,10 @@
  *   Collisions (two codes hashing to one bucket) are handled by separate
  *   chaining, so the map degrades gracefully instead of losing data.
  *
- * BUILD : gcc -O2 -Wall -o shortener url_shortener.c
+ * BUILD : Linux/macOS : gcc -O2 -Wall -o shortener url_shortener.c
+ *         Windows     : gcc -O2 -Wall -o shortener.exe url_shortener.c -lws2_32
  * RUN   : ./shortener          (then open http://localhost:8080)
+ *         ./shortener 3000     (or pick another port)
  *
  * NOTE  : The map lives in RAM and serves one request at a time — fine for a
  *         demo. A production version would persist to disk and fork/thread.
@@ -30,10 +33,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <unistd.h>
-#include <signal.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+#include <stdarg.h>
+
+/* ---- portability shim: the only part that differs between the platforms ---*/
+#ifdef _WIN32
+  #include <winsock2.h>                 /* Windows sockets (Winsock2)       */
+  #include <ws2tcpip.h>
+  #define CLOSE_SOCK closesocket
+  #ifdef _MSC_VER
+    #pragma comment(lib, "ws2_32.lib")  /* MSVC: auto-link the Winsock lib  */
+  #endif
+#else
+  #include <unistd.h>                   /* POSIX: close(), read()           */
+  #include <arpa/inet.h>                /* POSIX: inet/htons + sockets      */
+  #include <sys/socket.h>
+  #define CLOSE_SOCK close
+#endif
 
 #define PORT    8080
 #define BUCKETS 103              /* prime bucket count -> fewer collisions */
@@ -84,10 +99,19 @@ static void new_code(char out[8]) {
 }
 
 /* ------------------------- 3. HTTP HELPERS --------------------------------*/
+/* printf-to-socket: works everywhere (dprintf is not on Windows).           */
+static void sendf(int c, const char *fmt, ...) {
+    char b[2048];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    if (n > 0) send(c, b, (size_t)n, 0);
+}
+
 static void reply(int c, const char *status, const char *ctype,
                   const char *body) {
-    dprintf(c, "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-              "Connection: close\r\n\r\n", status, ctype, strlen(body));
+    sendf(c, "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+             "Connection: close\r\n\r\n", status, ctype, strlen(body));
     send(c, body, strlen(body), 0);
 }
 
@@ -126,7 +150,7 @@ static const char PAGE[] =
 /* ------------------------- 5. THE BACK END (routing) ----------------------*/
 static void handle(int c) {
     char buf[MAXLEN] = "", method[8] = "", path[MAXLEN] = "";
-    read(c, buf, MAXLEN - 1);
+    recv(c, buf, MAXLEN - 1, 0);                    /* read() on POSIX       */
     sscanf(buf, "%7s %8191s", method, path);        /* request line only */
 
     if (!strcmp(method, "GET") && !strcmp(path, "/"))          /* front end */
@@ -154,8 +178,8 @@ static void handle(int c) {
 
     else if (!strcmp(method, "GET") && path[0] == '/' && path[1]) {
         Entry *e = map_get(path + 1);                 /* O(1) hash lookup  */
-        if (e) dprintf(c, "HTTP/1.1 302 Found\r\nLocation: %s\r\n"
-                          "Content-Length: 0\r\n\r\n", e->val);
+        if (e) sendf(c, "HTTP/1.1 302 Found\r\nLocation: %s\r\n"
+                        "Content-Length: 0\r\n\r\n", e->val);
         else reply(c, "404 Not Found", "text/html",
                   "<h2>404 — short code not found</h2>");
     }
@@ -165,14 +189,17 @@ static void handle(int c) {
 
 int main(int argc, char **argv) {
     int port = argc > 1 ? atoi(argv[1]) : PORT;   /* optional: ./shortener 3000 */
-    signal(SIGCHLD, SIG_IGN);
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa)) { fprintf(stderr, "Winsock init failed\n"); return 1; }
+#endif
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) { perror("socket"); return 1; }
     struct sockaddr_in a = { .sin_family = AF_INET,
                              .sin_addr.s_addr = INADDR_ANY,
                              .sin_port = htons(port) };
     int one = 1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
     if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }
     listen(s, 16);
     printf("URL shortener running -> http://localhost:%d\n", port);
@@ -181,6 +208,6 @@ int main(int argc, char **argv) {
         int c = accept(s, NULL, NULL);
         if (c < 0) continue;
         handle(c);
-        close(c);
+        CLOSE_SOCK(c);
     }
 }
